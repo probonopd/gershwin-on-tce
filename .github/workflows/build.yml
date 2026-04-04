@@ -264,6 +264,8 @@ jobs:
                 echo "$soname" | grep -qE "$GLIBC_SKIP" && continue
                 # Check in the bundled Libraries dir
                 ls "$LIBDIR/${soname}"* 2>/dev/null | grep -q . && continue
+                # Check anywhere in the System tree (e.g. framework bundles)
+                find /tmp/tce-root/System -name "${soname}*" 2>/dev/null | grep -q . && continue
                 # Check GLIBC dir (just in case)
                 ls /tmp/tce-root/$GLIBC_DIR/${soname}* 2>/dev/null | grep -q . && continue
                 echo "MISSING: $soname  (needed by ${f#/tmp/tce-root})"
