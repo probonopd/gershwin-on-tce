@@ -75,14 +75,42 @@ echo ""
 echo "=== Building Gershwin Desktop ==="
 make install
 
+# --- Bundle shared libraries ---
+echo ""
+echo "=== Bundling shared libraries into /System/Library/Libraries/ ==="
+
+SKIP_RE='linux-vdso|^libc\.so|^libm\.so|^libdl\.so|^libpthread\.so|^librt\.so|^libresolv\.so|^libutil\.so|^ld-linux|^ld-musl|^libgcc_s\.so'
+mkdir -p /System/Library/Libraries
+
+find /System -type f | while read f; do
+    file "$f" 2>/dev/null | grep -q ELF || continue
+    ldd "$f" 2>/dev/null
+done | grep "=> /" | awk '{print $3}' | sort -u > /tmp/needed_libs.txt
+
+while read lib; do
+    [ -f "$lib" ] || continue
+    bn=$(basename "$lib")
+    echo "$bn" | grep -qE "$SKIP_RE" && continue
+    echo "$lib" | grep -q "^/System" && continue
+    [ -f "/System/Library/Libraries/$bn" ] && continue
+    echo "  Bundling: $bn"
+    cp -L "$lib" /System/Library/Libraries/
+done < /tmp/needed_libs.txt
+
 # --- Package as .tcz ---
 echo ""
 echo "=== Packaging as TCE extension (.tcz) ==="
 mkdir -p "$OUTPUT_DIR"
 
+# Stage /System with its directory name so squashfs contains System/Library/...
+# (TCE overlays at /, giving /System/Library/... matching gershwin's RPATH)
+mkdir -p /tmp/gershwin-staging
+cp -a /System /tmp/gershwin-staging/
+
 # Create the .tcz (SquashFS image with XZ compression)
-mksquashfs /System "$OUTPUT_DIR/${TCZ_NAME}.tcz" \
+mksquashfs /tmp/gershwin-staging "$OUTPUT_DIR/${TCZ_NAME}.tcz" \
     -comp xz -b 1M -noappend
+rm -rf /tmp/gershwin-staging
 
 # Generate file list
 unsquashfs -l "$OUTPUT_DIR/${TCZ_NAME}.tcz" | \

@@ -29,7 +29,7 @@ jobs:
       - name: Install prerequisites
         run: |
           apt-get update
-          apt-get install -y git tree squashfs-tools file
+          apt-get install -y git tree squashfs-tools file binutils
 
       - name: Checkout this repository
         uses: actions/checkout@v4
@@ -53,12 +53,70 @@ jobs:
         run: |
           make install
 
+      - name: Bundle shared libraries
+        run: |
+          # Copy all non-glibc shared libs needed by gershwin into /System/Library/Libraries/
+          # so the .tcz is self-contained on TCE (which only provides glibc in its base system).
+          echo "=== Collecting shared library dependencies ==="
+
+          # These are provided by TCE base glibc — never bundle them
+          SKIP_RE='linux-vdso|^libc\.so|^libm\.so|^libdl\.so|^libpthread\.so|^librt\.so|^libresolv\.so|^libutil\.so|^ld-linux|^ld-musl|^libgcc_s\.so'
+
+          mkdir -p /System/Library/Libraries
+
+          # Walk every ELF in /System, collect all transitive .so dependencies
+          find /System -type f | while read f; do
+            file "$f" 2>/dev/null | grep -q ELF || continue
+            ldd "$f" 2>/dev/null
+          done | grep "=> /" | awk '{print $3}' | sort -u > /tmp/needed_libs.txt
+
+          echo "Total unique libs needed: $(wc -l < /tmp/needed_libs.txt)"
+
+          # Bundle any lib not already in /System and not a glibc lib
+          BUNDLED=0
+          while read lib; do
+            [ -f "$lib" ] || continue
+            bn=$(basename "$lib")
+            echo "$bn" | grep -qE "$SKIP_RE" && continue
+            # Already provided by the build itself under /System
+            echo "$lib" | grep -q "^/System" && continue
+            [ -f "/System/Library/Libraries/$bn" ] && continue
+            echo "  Bundling: $bn"
+            cp -L "$lib" /System/Library/Libraries/
+            BUNDLED=$((BUNDLED + 1))
+          done < /tmp/needed_libs.txt
+
+          echo "Bundled $BUNDLED additional libraries"
+          echo ""
+          echo "=== Verifying no unresolved deps remain ==="
+          UNRESOLVED=$(find /System -type f | while read f; do
+            file "$f" 2>/dev/null | grep -q "ELF.*executable" || continue
+            ldd "$f" 2>/dev/null | grep "not found"
+          done | wc -l)
+          echo "Unresolved deps after bundling: $UNRESOLVED"
+          if [ "$UNRESOLVED" -gt 0 ]; then
+            echo "WARNING: Some deps still unresolved:"
+            find /System -type f | while read f; do
+              file "$f" 2>/dev/null | grep -q "ELF.*executable" || continue
+              ldd "$f" 2>/dev/null | grep "not found" | sed "s|^|  $f: |"
+            done | sort -u | head -30
+          fi
+
       - name: Package as TCE extension
         run: |
           mkdir -p artifacts
 
+          # Stage /System with its directory name so that the squashfs contains
+          # System/Library/... paths. TCE overlays at /, giving /System/Library/...
+          # which matches the RPATH baked into the Gershwin binaries.
+          # (mksquashfs <src> packs the *contents* of <src> at the squashfs root,
+          #  so we need /System inside a staging dir, not mksquashfs /System directly.)
+          mkdir -p /tmp/gershwin-staging
+          cp -a /System /tmp/gershwin-staging/
+
           # Create .tcz (SquashFS with XZ compression)
-          mksquashfs /System artifacts/gershwin.tcz -comp xz -b 1M -noappend
+          mksquashfs /tmp/gershwin-staging artifacts/gershwin.tcz -comp xz -b 1M -noappend
+          rm -rf /tmp/gershwin-staging
 
           # Generate file list
           unsquashfs -l artifacts/gershwin.tcz | \
@@ -83,7 +141,7 @@ jobs:
           Size:           ${SIZE}
           Extension_by:   gershwin-on-tce
           Tags:           DESKTOP GNUSTEP WINDOWMANAGER GUI
-          Comments:       Complete Gershwin Desktop built from gershwin-developer.
+          Comments:       Complete Gershwin Desktop, self-contained with bundled shared libs.
                           Architecture: ${{ matrix.arch }}
                           Built on Debian oldstable (glibc 2.36) for TCE 15.x compatibility.
                           Start with: startx /System/Library/Scripts/Gershwin.sh
@@ -153,6 +211,88 @@ jobs:
           libXt.tcz
           avahi.tcz
           EOF
+
+      - name: Verify installation in TCE chroot
+        run: |
+          ARCH=$(uname -m)
+          echo "=== Verifying gershwin.tcz installs correctly on TCE ($ARCH) ==="
+
+          # Extract squashfs — should have System/ at root (not Library/ directly)
+          mkdir -p /tmp/tce-root
+          unsquashfs -d /tmp/tce-root artifacts/gershwin.tcz
+
+          echo "Squashfs root contents:"
+          ls /tmp/tce-root/
+
+          if [ ! -d /tmp/tce-root/System ]; then
+            echo "ERROR: squashfs does not contain System/ at root — RPATH /System/Library/Libraries would break!"
+            exit 1
+          fi
+          echo "OK: System/ path exists in squashfs"
+
+          LIBDIR=/tmp/tce-root/System/Library/Libraries
+          echo "Libs in squashfs: $(ls "$LIBDIR" 2>/dev/null | wc -l)"
+
+          # Populate a minimal TCE-like chroot: glibc only (everything else must come from .tcz)
+          if [ "$ARCH" = "x86_64" ]; then
+            GLIBC_DIR=lib/x86_64-linux-gnu
+            LDSO=lib64/ld-linux-x86-64.so.2
+          elif [ "$ARCH" = "aarch64" ]; then
+            GLIBC_DIR=lib/aarch64-linux-gnu
+            LDSO=lib/ld-linux-aarch64.so.1
+          fi
+          mkdir -p /tmp/tce-root/$GLIBC_DIR /tmp/tce-root/lib64
+          cp -a /$GLIBC_DIR/libc.so*       /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
+          cp -a /$GLIBC_DIR/libm.so*       /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
+          cp -a /$GLIBC_DIR/libdl.so*      /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
+          cp -a /$GLIBC_DIR/libpthread.so* /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
+          cp -a /$GLIBC_DIR/librt.so*      /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
+          cp -a /$GLIBC_DIR/libresolv.so*  /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
+          cp -a /$GLIBC_DIR/libgcc_s.so*   /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
+          cp -a /$LDSO /tmp/tce-root/$LDSO 2>/dev/null || \
+            cp -a /$LDSO /tmp/tce-root/lib64/ 2>/dev/null || true
+
+          # Verify every ELF file's NEEDED entries are satisfied in the chroot
+          echo "=== Checking NEEDED entries for all ELF files ==="
+          rm -f /tmp/missing_deps.txt
+          GLIBC_SKIP='^(linux-vdso\.so|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libutil\.so|ld-linux|ld-musl|libgcc_s\.so)'
+
+          find /tmp/tce-root/System -type f | while read f; do
+            file "$f" 2>/dev/null | grep -q ELF || continue
+            readelf -d "$f" 2>/dev/null | grep "(NEEDED)" | \
+              sed 's/.*\[//;s/\].*//' | while read soname; do
+                echo "$soname" | grep -qE "$GLIBC_SKIP" && continue
+                # Check in the bundled Libraries dir
+                ls "$LIBDIR/${soname}"* 2>/dev/null | grep -q . && continue
+                # Check GLIBC dir (just in case)
+                ls /tmp/tce-root/$GLIBC_DIR/${soname}* 2>/dev/null | grep -q . && continue
+                echo "MISSING: $soname  (needed by ${f#/tmp/tce-root})"
+              done
+          done | sort -u | tee /tmp/missing_deps.txt
+
+          if [ -s /tmp/missing_deps.txt ]; then
+            echo ""
+            echo "ERROR: $(wc -l < /tmp/missing_deps.txt) missing library/ies — re-run lib bundling step"
+            exit 1
+          fi
+          echo "All NEEDED shared libraries are present in the TCZ!"
+
+          # Sanity-check: use the dynamic linker to list deps of a few key executables
+          echo ""
+          echo "=== Sanity check via dynamic linker --list ==="
+          for exe in $(find /tmp/tce-root/System -type f -executable \
+                        ! -name "*.sh" ! -name "*.py" | head -5); do
+            file "$exe" 2>/dev/null | grep -q "ELF.*executable" || continue
+            rel="${exe#/tmp/tce-root}"
+            echo -n "Testing $rel ... "
+            result=$(chroot /tmp/tce-root /$LDSO --list "$rel" 2>&1)
+            if echo "$result" | grep -q "not found"; then
+              echo "FAILED"
+              echo "$result" | grep "not found"
+            else
+              echo "OK"
+            fi
+          done
 
       - name: List build artifacts
         run: |
