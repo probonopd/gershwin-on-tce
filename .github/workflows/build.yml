@@ -242,15 +242,11 @@ jobs:
             LDSO=lib/ld-linux-aarch64.so.1
           fi
           mkdir -p /tmp/tce-root/$GLIBC_DIR /tmp/tce-root/lib64
-          cp -a /$GLIBC_DIR/libc.so*       /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
-          cp -a /$GLIBC_DIR/libm.so*       /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
-          cp -a /$GLIBC_DIR/libdl.so*      /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
-          cp -a /$GLIBC_DIR/libpthread.so* /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
-          cp -a /$GLIBC_DIR/librt.so*      /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
-          cp -a /$GLIBC_DIR/libresolv.so*  /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
-          cp -a /$GLIBC_DIR/libgcc_s.so*   /tmp/tce-root/$GLIBC_DIR/ 2>/dev/null || true
-          cp -a /$LDSO /tmp/tce-root/$LDSO 2>/dev/null || \
-            cp -a /$LDSO /tmp/tce-root/lib64/ 2>/dev/null || true
+          # Use cp -rL to dereference all symlinks (so chroot sees real files, not broken symlinks)
+          cp -rL /$GLIBC_DIR/ /tmp/tce-root/$(dirname $GLIBC_DIR)/ 2>/dev/null || true
+          # Dynamic linker: dereference the lib64 symlink before copying
+          cp -L /$LDSO /tmp/tce-root/$LDSO 2>/dev/null || \
+            cp -L /$LDSO /tmp/tce-root/lib64/ 2>/dev/null || true
 
           # Verify every ELF file's NEEDED entries are satisfied in the chroot
           echo "=== Checking NEEDED entries for all ELF files ==="
