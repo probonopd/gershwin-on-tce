@@ -1,0 +1,126 @@
+name: Build Gershwin TCE Extension
+
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+    branches: ["*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build gershwin.tcz
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:bookworm
+      options: --privileged
+    steps:
+      - name: Install prerequisites
+        run: |
+          apt-get update
+          apt-get install -y git tree squashfs-tools file
+
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Clone gershwin-developer
+        run: |
+          git clone --depth 1 https://github.com/gershwin-desktop/gershwin-developer.git /tmp/gershwin-developer
+
+      - name: Install build dependencies
+        working-directory: /tmp/gershwin-developer
+        run: |
+          ./Library/Scripts/Bootstrap.sh
+
+      - name: Checkout source repositories
+        working-directory: /tmp/gershwin-developer
+        run: |
+          PINNED=1 ./Library/Scripts/Checkout.sh
+
+      - name: Build Gershwin Desktop
+        working-directory: /tmp/gershwin-developer
+        run: |
+          make install
+
+      - name: Package as TCE extension
+        run: |
+          mkdir -p artifacts
+
+          # Create .tcz (SquashFS with XZ compression)
+          mksquashfs /System artifacts/gershwin.tcz -comp xz -b 1M -noappend
+
+          # Generate file list
+          unsquashfs -l artifacts/gershwin.tcz | \
+              grep -v "^squashfs-root$" | \
+              sed 's|^squashfs-root||' | \
+              sort > artifacts/gershwin.tcz.list
+
+          # Generate MD5 checksum
+          cd artifacts
+          md5sum gershwin.tcz > gershwin.tcz.md5.txt
+
+          # Generate metadata
+          TIMESTAMP=$(date +%Y/%m/%d)
+          SIZE=$(du -h gershwin.tcz | cut -f1)
+          cat > gershwin.tcz.info << INFOEOF
+          Title:          gershwin.tcz
+          Description:    Gershwin Desktop Environment based on GNUstep
+          Version:        $(date +%Y%m%d)
+          Author:         Gershwin Desktop Project
+          Original-site:  https://github.com/gershwin-desktop
+          Copying-policy: MIT
+          Size:           ${SIZE}
+          Extension_by:   gershwin-on-tce
+          Tags:           DESKTOP GNUSTEP WINDOWMANAGER GUI
+          Comments:       Complete Gershwin Desktop built from gershwin-developer.
+                          Start with: startx /System/Library/Scripts/Gershwin.sh
+          Change-log:     ${TIMESTAMP} Initial build
+          Current:        ${TIMESTAMP}
+          INFOEOF
+
+          # Runtime dependencies (TCE extensions)
+          cat > gershwin.tcz.dep << DEPEOF
+          Xorg-7.7-lib.tcz
+          cairo.tcz
+          libpng.tcz
+          libtiff.tcz
+          libjpeg-turbo.tcz
+          libxml2.tcz
+          libxslt.tcz
+          gnutls35.tcz
+          libffi.tcz
+          icu74.tcz
+          giflib7.tcz
+          libao.tcz
+          portaudio.tcz
+          dbus.tcz
+          cups.tcz
+          libxcb.tcz
+          libXft.tcz
+          libXrandr.tcz
+          libXcomposite.tcz
+          libXt.tcz
+          avahi.tcz
+          imagemagick.tcz
+          freeglut.tcz
+          DEPEOF
+
+      - name: List build artifacts
+        run: |
+          echo "=== Build artifacts ==="
+          ls -lh artifacts/
+          echo ""
+          echo "=== TCZ file list (first 50 entries) ==="
+          head -50 artifacts/gershwin.tcz.list
+          echo ""
+          echo "=== TCZ info ==="
+          cat artifacts/gershwin.tcz.info
+          echo ""
+          echo "=== MD5 ==="
+          cat artifacts/gershwin.tcz.md5.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gershwin-tcz
+          path: artifacts/
