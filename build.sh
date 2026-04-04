@@ -23,6 +23,9 @@ GERSHWIN_BRANCH="${GERSHWIN_BRANCH:-main}"
 BUILD_DIR="${BUILD_DIR:-/tmp/gershwin-build}"
 OUTPUT_DIR="${OUTPUT_DIR:-$(pwd)/artifacts}"
 TCZ_NAME="gershwin"
+# Target: Tiny Core Linux 15.x
+# Build on Debian oldstable (bookworm, glibc 2.36) for TCE compatibility
+# TCE 15.x x86_64 uses glibc 2.38, aarch64 uses glibc 2.39
 
 # --- Preflight checks ---
 if [ "$(id -u)" -ne 0 ]; then
@@ -111,17 +114,22 @@ Change-log:     ${TIMESTAMP} Initial build
 Current:        ${TIMESTAMP}
 EOF
 
-# Generate runtime dependency list (TCE extensions needed at runtime)
-# These are X11 and library TCE extensions the desktop needs
+# Generate runtime dependency list (TCE 15.x extensions needed at runtime)
+# Package names verified against http://repo.tinycorelinux.net/15.x/
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ]; then
 cat > "${TCZ_NAME}.tcz.dep" << EOF
 Xorg-7.7-lib.tcz
+libX11.tcz
+libXext.tcz
+libXrender.tcz
 cairo.tcz
 libpng.tcz
 libtiff.tcz
 libjpeg-turbo.tcz
 libxml2.tcz
 libxslt.tcz
-gnutls35.tcz
+gnutls38.tcz
 libffi.tcz
 icu74.tcz
 giflib7.tcz
@@ -138,6 +146,35 @@ avahi.tcz
 imagemagick.tcz
 freeglut.tcz
 EOF
+elif [ "$ARCH" = "aarch64" ]; then
+cat > "${TCZ_NAME}.tcz.dep" << EOF
+libX11.tcz
+libXext.tcz
+libXrender.tcz
+cairo.tcz
+libpng.tcz
+libtiff.tcz
+libjpeg-turbo.tcz
+libxml2.tcz
+libxslt.tcz
+gnutls.tcz
+libffi7.tcz
+icu73.tcz
+giflib.tcz
+portaudio.tcz
+dbus.tcz
+cups.tcz
+libxcb.tcz
+libXft.tcz
+libXrandr.tcz
+libXcomposite.tcz
+libXt.tcz
+avahi.tcz
+EOF
+else
+  echo "Warning: Unknown architecture $ARCH, generating empty dep file"
+  : > "${TCZ_NAME}.tcz.dep"
+fi
 
 echo ""
 echo "=== Build complete ==="

@@ -12,11 +12,19 @@ permissions:
 
 jobs:
   build:
-    name: Build gershwin.tcz
-    runs-on: ubuntu-24.04
+    name: Build gershwin.tcz (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     container:
-      image: debian:bookworm
+      image: debian:oldstable
       options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Install prerequisites
         run: |
@@ -76,21 +84,29 @@ jobs:
           Extension_by:   gershwin-on-tce
           Tags:           DESKTOP GNUSTEP WINDOWMANAGER GUI
           Comments:       Complete Gershwin Desktop built from gershwin-developer.
+                          Architecture: ${{ matrix.arch }}
+                          Built on Debian oldstable (glibc 2.36) for TCE 15.x compatibility.
                           Start with: startx /System/Library/Scripts/Gershwin.sh
           Change-log:     ${TIMESTAMP} Initial build
           Current:        ${TIMESTAMP}
           INFOEOF
 
-          # Runtime dependencies (TCE extensions)
-          cat > gershwin.tcz.dep << DEPEOF
+      # TCE 15.x x86_64: all package names verified against repo
+      - name: Generate runtime dependencies (x86_64)
+        if: matrix.arch == 'x86_64'
+        run: |
+          cat > artifacts/gershwin.tcz.dep << 'EOF'
           Xorg-7.7-lib.tcz
+          libX11.tcz
+          libXext.tcz
+          libXrender.tcz
           cairo.tcz
           libpng.tcz
           libtiff.tcz
           libjpeg-turbo.tcz
           libxml2.tcz
           libxslt.tcz
-          gnutls35.tcz
+          gnutls38.tcz
           libffi.tcz
           icu74.tcz
           giflib7.tcz
@@ -106,7 +122,37 @@ jobs:
           avahi.tcz
           imagemagick.tcz
           freeglut.tcz
-          DEPEOF
+          EOF
+
+      # TCE 15.x aarch64 (piCore64): package names verified against repo
+      # Note: libao, imagemagick, freeglut are not available for aarch64
+      - name: Generate runtime dependencies (aarch64)
+        if: matrix.arch == 'aarch64'
+        run: |
+          cat > artifacts/gershwin.tcz.dep << 'EOF'
+          libX11.tcz
+          libXext.tcz
+          libXrender.tcz
+          cairo.tcz
+          libpng.tcz
+          libtiff.tcz
+          libjpeg-turbo.tcz
+          libxml2.tcz
+          libxslt.tcz
+          gnutls.tcz
+          libffi7.tcz
+          icu73.tcz
+          giflib.tcz
+          portaudio.tcz
+          dbus.tcz
+          cups.tcz
+          libxcb.tcz
+          libXft.tcz
+          libXrandr.tcz
+          libXcomposite.tcz
+          libXt.tcz
+          avahi.tcz
+          EOF
 
       - name: List build artifacts
         run: |
@@ -119,11 +165,14 @@ jobs:
           echo "=== TCZ info ==="
           cat artifacts/gershwin.tcz.info
           echo ""
+          echo "=== TCZ deps ==="
+          cat artifacts/gershwin.tcz.dep
+          echo ""
           echo "=== MD5 ==="
           cat artifacts/gershwin.tcz.md5.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gershwin-tcz
+          name: gershwin-tcz-${{ matrix.arch }}
           path: artifacts/
