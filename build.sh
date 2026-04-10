@@ -102,6 +102,16 @@ setup_chroot() {
     # DNS resolution
     sudo cp /etc/resolv.conf "${CHROOT_DIR}/etc/resolv.conf"
 
+    # CA certificates — TCE git/curl are compiled with /usr/local prefix and
+    # look for certs at /usr/local/etc/ssl/certs/ca-certificates.crt
+    sudo mkdir -p "${CHROOT_DIR}/usr/local/etc/ssl/certs"
+    sudo cp /etc/ssl/certs/ca-certificates.crt \
+        "${CHROOT_DIR}/usr/local/etc/ssl/certs/ca-certificates.crt"
+    # Also place them where standard tools expect them
+    sudo mkdir -p "${CHROOT_DIR}/etc/ssl/certs"
+    sudo cp /etc/ssl/certs/ca-certificates.crt \
+        "${CHROOT_DIR}/etc/ssl/certs/ca-certificates.crt"
+
     # Make /usr/local/lib visible to the dynamic linker inside chroot
     sudo mkdir -p "${CHROOT_DIR}/etc/ld.so.conf.d"
     echo "/usr/local/lib" | sudo tee "${CHROOT_DIR}/etc/ld.so.conf.d/usr-local.conf" > /dev/null
