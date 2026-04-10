@@ -1,0 +1,51 @@
+name: Build Gershwin on Tiny Core Linux 16.x
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Cache TCE package downloads
+        uses: actions/cache@v4
+        with:
+          path: /tmp/tce-cache
+          key: tce-16.x-pkgs-${{ hashFiles('build.sh') }}
+          restore-keys: |
+            tce-16.x-pkgs-
+
+      - name: Cache TCE root filesystem
+        uses: actions/cache@v4
+        with:
+          path: /tmp/corepure64.gz
+          key: tce-16.x-corepure64
+
+      - name: Build Gershwin in TCE 16.x chroot
+        run: |
+          chmod +x build.sh
+          sudo BUILD_DIR="$GITHUB_WORKSPACE" \
+               CACHE_DIR=/tmp/tce-cache \
+               CHROOT_DIR=/tmp/tce-chroot \
+               ./build.sh
+
+      - name: Upload gershwin-system.tcz
+        uses: actions/upload-artifact@v4
+        with:
+          name: gershwin-system-tce
+          path: |
+            gershwin-system.tcz
+            gershwin-system.tcz.md5.txt
+            gershwin-system.tcz.list
+            gershwin-system.tcz.info
+            gershwin-system.tcz.dep
+          if-no-files-found: error
