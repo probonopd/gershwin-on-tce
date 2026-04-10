@@ -68,3 +68,10 @@ jobs:
             gershwin-system.tcz.info
             gershwin-system.tcz.dep
           if-no-files-found: error
+
+      - name: Upload bootable disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: gershwin-disk-image-${{ matrix.arch }}
+          path: gershwin-${{ matrix.tce_arch }}.img.gz
+          if-no-files-found: error

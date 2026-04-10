@@ -421,6 +421,290 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Helper: download a TCZ and all its runtime deps to a directory.
+# Tracks download order (deps-first) in _img_onboot for onboot.lst.
+# ---------------------------------------------------------------------------
+_img_pkgs=""
+_img_onboot=""
+
+download_tcz_to_dir() {
+    local pkg dest_dir
+    pkg="${1%.tcz}"
+    dest_dir="$2"
+
+    # Skip already-processed packages
+    case " ${_img_pkgs} " in
+        *" ${pkg} "*) return 0 ;;
+    esac
+    _img_pkgs="${_img_pkgs} ${pkg}"
+
+    # Resolve and download dependencies first
+    local deps
+    deps=$(wget -qO- "${TCE_TCZ_URL}/${pkg}.tcz.dep" 2>/dev/null | tr -d '\r' || true)
+    for dep in ${deps}; do
+        dep="${dep%.tcz}"
+        [ -n "${dep}" ] && download_tcz_to_dir "${dep}" "${dest_dir}"
+    done
+
+    # Download the TCZ (use the shared cache)
+    local tcz="${CACHE_DIR}/${pkg}.tcz"
+    mkdir -p "${CACHE_DIR}"
+    if [ ! -s "${tcz}" ]; then
+        if ! wget -q -O "${tcz}" "${TCE_TCZ_URL}/${pkg}.tcz"; then
+            echo "  [img-tcz] WARNING: ${pkg}.tcz not found, skipping"
+            rm -f "${tcz}"
+            return 0
+        fi
+    fi
+
+    echo "  [img-tcz] ${pkg}"
+    sudo cp "${tcz}" "${dest_dir}/${pkg}.tcz"
+    _img_onboot="${_img_onboot}${pkg}.tcz
+"
+}
+
+# ---------------------------------------------------------------------------
+# Create a minimal autostart TCZ that launches X + Gershwin at boot.
+# Installed to /opt/bootlocal.sh (run by TCE at end of boot) and
+# /home/tc/.xsession (run by startx).
+# ---------------------------------------------------------------------------
+create_autostart_tcz() {
+    local dest_dir="$1"
+    local staging="/tmp/autostart-tcz-staging"
+
+    sudo rm -rf "${staging}"
+    sudo mkdir -p "${staging}/opt"
+
+    # bootlocal.sh — TCE runs this at the end of boot sequence
+    sudo tee "${staging}/opt/bootlocal.sh" > /dev/null << 'BOOTLOCAL'
+#!/bin/sh
+# Auto-start Gershwin desktop
+su - tc -c 'DISPLAY=:0 startx' &
+BOOTLOCAL
+    sudo chmod +x "${staging}/opt/bootlocal.sh"
+
+    # .xsession — called by startx to decide what runs in X
+    sudo mkdir -p "${staging}/home/tc"
+    sudo tee "${staging}/home/tc/.xsession" > /dev/null << 'XSESSION'
+#!/bin/sh
+export PATH=/System/Library/Tools:/usr/local/bin:/usr/bin:/bin
+export GNUSTEP_MAKEFILES=/System/Library/Makefiles
+export GNUSTEP_USER_ROOT=/home/tc/GNUstep
+mkdir -p "${GNUSTEP_USER_ROOT}/Library/ApplicationSupport"
+exec /System/Library/CoreServices/Workspace.app/Workspace
+XSESSION
+    sudo chmod +x "${staging}/home/tc/.xsession"
+
+    mksquashfs "${staging}" "${dest_dir}/gershwin-autostart.tcz" \
+        -noappend -no-progress > /dev/null 2>&1
+    echo "  [img-tcz] gershwin-autostart (autostart extension)"
+}
+
+# ---------------------------------------------------------------------------
+# Create a bootable x86_64 disk image (syslinux + TCE + Gershwin + Xorg)
+# ---------------------------------------------------------------------------
+make_image_x86_64() {
+    echo "[image] creating bootable x86_64 disk image"
+
+    local img="${BUILD_DIR}/gershwin-x86_64.img"
+    local img_mb=640
+
+    # Extra host tools
+    sudo apt-get install -y -qq syslinux syslinux-utils dosfstools parted
+
+    # Download the TCE kernel (cached)
+    local vmlinuz="/tmp/vmlinuz64"
+    if [ ! -s "${vmlinuz}" ]; then
+        wget -q "http://www.tinycorelinux.net/16.x/x86_64/release/distribution_files/vmlinuz64" \
+            -O "${vmlinuz}"
+    fi
+
+    # Create raw disk image
+    sudo rm -f "${img}"
+    dd if=/dev/zero of="${img}" bs=1M count="${img_mb}" status=none
+
+    # Partition: 1MiB gap | 80MiB FAT32 boot (p1) | rest ext4 TCE storage (p2)
+    parted -s "${img}" \
+        mklabel msdos \
+        mkpart primary fat32 1MiB 81MiB \
+        set 1 boot on \
+        mkpart primary ext4 81MiB 100%
+
+    local loop
+    loop=$(sudo losetup -Pf --show "${img}")
+
+    sudo mkfs.vfat -F 32 -n TCEBOOT "${loop}p1"
+    sudo mkfs.ext4 -q -L TCESTORE  "${loop}p2"
+
+    # Install syslinux MBR and FAT-partition bootloader
+    local mbr_bin
+    for mbr_bin in /usr/lib/syslinux/mbr/mbr.bin /usr/lib/syslinux/mbr.bin; do
+        [ -f "${mbr_bin}" ] && break
+    done
+    sudo dd if="${mbr_bin}" of="${loop}" bs=440 count=1 conv=notrunc 2>/dev/null
+    sudo syslinux --install "${loop}p1"
+
+    # Populate boot partition (p1)
+    local boot_mnt="/tmp/img-boot-x86"
+    sudo mkdir -p "${boot_mnt}"
+    sudo mount "${loop}p1" "${boot_mnt}"
+    sudo cp /tmp/corepure64.gz "${boot_mnt}/corepure64.gz"
+    sudo cp "${vmlinuz}"       "${boot_mnt}/vmlinuz64"
+    sudo tee "${boot_mnt}/syslinux.cfg" > /dev/null << 'SYSCONFIG'
+TIMEOUT 50
+PROMPT 0
+DEFAULT gershwin
+
+LABEL gershwin
+  MENU LABEL Gershwin Desktop (TCE 16.x)
+  KERNEL vmlinuz64
+  INITRD corepure64.gz
+  APPEND quiet tce=sda2 nozswap waitusb=5 noswap
+SYSCONFIG
+    sudo umount "${boot_mnt}"
+
+    # Populate TCE storage partition (p2)
+    local store_mnt="/tmp/img-store-x86"
+    sudo mkdir -p "${store_mnt}"
+    sudo mount "${loop}p2" "${store_mnt}"
+    sudo mkdir -p "${store_mnt}/tce/optional"
+
+    # Copy the Gershwin TCZ (already built)
+    sudo cp "${BUILD_DIR}/gershwin-system.tcz" "${store_mnt}/tce/optional/"
+
+    # Download Xorg bundle (Xorg-7.7.tcz pulls xorg-server + vesa + input + fonts)
+    _img_pkgs="" ; _img_onboot=""
+    download_tcz_to_dir Xorg-7.7           "${store_mnt}/tce/optional"
+
+    # Gershwin runtime libraries
+    download_tcz_to_dir libX11              "${store_mnt}/tce/optional"
+    download_tcz_to_dir libXft              "${store_mnt}/tce/optional"
+    download_tcz_to_dir libXt               "${store_mnt}/tce/optional"
+    download_tcz_to_dir cairo               "${store_mnt}/tce/optional"
+    download_tcz_to_dir gnutls38            "${store_mnt}/tce/optional"
+    download_tcz_to_dir icu74               "${store_mnt}/tce/optional"
+    download_tcz_to_dir libxml2             "${store_mnt}/tce/optional"
+    download_tcz_to_dir libxslt             "${store_mnt}/tce/optional"
+    download_tcz_to_dir libffi              "${store_mnt}/tce/optional"
+    download_tcz_to_dir libjpeg-turbo       "${store_mnt}/tce/optional"
+    download_tcz_to_dir libpng              "${store_mnt}/tce/optional"
+    download_tcz_to_dir libtiff             "${store_mnt}/tce/optional"
+    download_tcz_to_dir avahi               "${store_mnt}/tce/optional"
+
+    # Autostart extension (boots into Gershwin automatically)
+    create_autostart_tcz "${store_mnt}/tce/optional"
+
+    # Write onboot.lst (deps-first order from download tracking, then gershwin + autostart last)
+    printf '%s' "${_img_onboot}" | sudo tee "${store_mnt}/tce/onboot.lst" > /dev/null
+    printf '%s\n' "gershwin-system.tcz" "gershwin-autostart.tcz" \
+        | sudo tee -a "${store_mnt}/tce/onboot.lst" > /dev/null
+
+    echo "[image] x86_64 storage contents ($(du -sh "${store_mnt}/tce/optional" | cut -f1)):"
+    ls -lh "${store_mnt}/tce/optional/"
+    sudo umount "${store_mnt}"
+    sudo losetup -d "${loop}"
+
+    echo "[image] compressing x86_64 image (${img_mb} MB) ..."
+    gzip -9 "${img}"
+    echo "[image] x86_64 image: $(ls -lh "${img}.gz")"
+
+    local gz_size
+    gz_size=$(stat -c%s "${img}.gz")
+    if [ "${gz_size}" -lt 83886080 ]; then
+        echo "WARNING: gershwin-x86_64.img.gz is only ${gz_size} bytes (< 80 MB); image may be incomplete"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Create a bootable aarch64 Pi disk image (expand piCore64 + add Gershwin + Xorg)
+# ---------------------------------------------------------------------------
+make_image_aarch64() {
+    echo "[image] creating bootable aarch64 Pi disk image"
+
+    local base_img="/tmp/picore64.img"
+    local img="${BUILD_DIR}/gershwin-aarch64.img"
+    local img_mb=640
+
+    # Extra host tools (parted, e2fsprogs)
+    sudo apt-get install -y -qq parted e2fsprogs
+
+    # Start from the piCore64 base image (already downloaded for chroot setup)
+    sudo cp "${base_img}" "${img}"
+
+    # Expand the raw image file to target size, then resize p2 via parted
+    sudo truncate -s "${img_mb}M" "${img}"
+    sudo parted -s "${img}" resizepart 2 100%
+
+    local loop
+    loop=$(sudo losetup -Pf --show "${img}")
+
+    # Fix and expand the ext4 filesystem on p2 to use the new space
+    sudo e2fsck -f -y "${loop}p2" 2>/dev/null || true
+    sudo resize2fs "${loop}p2"
+
+    # Populate the TCE storage partition (p2)
+    local store_mnt="/tmp/img-store-arm"
+    sudo mkdir -p "${store_mnt}"
+    sudo mount "${loop}p2" "${store_mnt}"
+    sudo mkdir -p "${store_mnt}/tce/optional"
+
+    # Copy the Gershwin TCZ (already built)
+    sudo cp "${BUILD_DIR}/gershwin-system.tcz" "${store_mnt}/tce/optional/"
+
+    # Download aarch64 Xorg bundle and runtime dependencies
+    _img_pkgs="" ; _img_onboot=""
+    download_tcz_to_dir Xorg                "${store_mnt}/tce/optional"
+
+    # Gershwin runtime libraries (aarch64 package names)
+    download_tcz_to_dir libX11              "${store_mnt}/tce/optional"
+    download_tcz_to_dir libXft              "${store_mnt}/tce/optional"
+    download_tcz_to_dir libXt               "${store_mnt}/tce/optional"
+    download_tcz_to_dir cairo               "${store_mnt}/tce/optional"
+    download_tcz_to_dir gnutls              "${store_mnt}/tce/optional"
+    download_tcz_to_dir icu73               "${store_mnt}/tce/optional"
+    download_tcz_to_dir libxml2             "${store_mnt}/tce/optional"
+    download_tcz_to_dir libxslt             "${store_mnt}/tce/optional"
+    download_tcz_to_dir libffi7             "${store_mnt}/tce/optional"
+    download_tcz_to_dir libjpeg-turbo       "${store_mnt}/tce/optional"
+    download_tcz_to_dir libpng              "${store_mnt}/tce/optional"
+    download_tcz_to_dir libtiff             "${store_mnt}/tce/optional"
+    download_tcz_to_dir avahi               "${store_mnt}/tce/optional"
+
+    # Autostart extension (boots into Gershwin automatically)
+    create_autostart_tcz "${store_mnt}/tce/optional"
+
+    # Write onboot.lst
+    printf '%s' "${_img_onboot}" | sudo tee "${store_mnt}/tce/onboot.lst" > /dev/null
+    printf '%s\n' "gershwin-system.tcz" "gershwin-autostart.tcz" \
+        | sudo tee -a "${store_mnt}/tce/onboot.lst" > /dev/null
+
+    echo "[image] aarch64 storage contents ($(du -sh "${store_mnt}/tce/optional" | cut -f1)):"
+    ls -lh "${store_mnt}/tce/optional/"
+    sudo umount "${store_mnt}"
+    sudo losetup -d "${loop}"
+
+    echo "[image] compressing aarch64 image (${img_mb} MB) ..."
+    gzip -9 "${img}"
+    echo "[image] aarch64 image: $(ls -lh "${img}.gz")"
+
+    local gz_size
+    gz_size=$(stat -c%s "${img}.gz")
+    if [ "${gz_size}" -lt 83886080 ]; then
+        echo "WARNING: gershwin-aarch64.img.gz is only ${gz_size} bytes (< 80 MB); image may be incomplete"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Create bootable disk image (arch dispatcher)
+# ---------------------------------------------------------------------------
+make_image() {
+    case "${TCE_ARCH}" in
+        aarch64) make_image_aarch64 ;;
+        *)       make_image_x86_64  ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Cleanup helper (unmount pseudo-filesystems on exit)
 # ---------------------------------------------------------------------------
 cleanup() {
@@ -429,6 +713,11 @@ cleanup() {
     sudo umount -l "${CHROOT_DIR}/dev"     2>/dev/null || true
     sudo umount -l "${CHROOT_DIR}/sys"     2>/dev/null || true
     sudo umount -l "${CHROOT_DIR}/proc"    2>/dev/null || true
+    # Clean up any image loop devices
+    sudo losetup -a 2>/dev/null \
+        | grep -E "gershwin.*\.img" \
+        | cut -d: -f1 \
+        | while read -r ldev; do sudo losetup -d "${ldev}" 2>/dev/null || true; done
 }
 trap cleanup EXIT
 
@@ -440,8 +729,11 @@ setup_chroot
 install_build_deps
 build_gershwin
 package_output
+make_image
 
 echo ""
 echo "=== Build complete ==="
 echo "Artifacts:"
-ls -lh "${BUILD_DIR}/gershwin-system.tcz"*
+ls -lh "${BUILD_DIR}/gershwin-system.tcz"* "${BUILD_DIR}/gershwin-${TCE_ARCH}.img.gz" 2>/dev/null || \
+    ls -lh "${BUILD_DIR}/gershwin-system.tcz"*
+
