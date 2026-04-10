@@ -138,6 +138,10 @@ setup_chroot() {
 install_build_deps() {
     echo "[deps] installing build dependencies from TCE ${TCE_VERSION}"
 
+    # GNU tar and full xz — BusyBox tar/xz lack flags needed by gnustep-make install rules
+    install_tcz tar
+    install_tcz xz
+
     # Core build toolchain (gcc 14.2.0, binutils, make, etc.)
     install_tcz compiletc
 
