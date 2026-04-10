@@ -121,33 +121,41 @@ setup_chroot_aarch64() {
     local img="/tmp/picore64.img"
 
     if [ ! -s "${img_gz}" ]; then
-        echo "[setup] downloading piCore64 disk image …"
+        echo "[setup] downloading piCore64 disk image ..."
         wget -q "${PI_IMG_URL}" -O "${img_gz}"
     fi
 
-    # Decompress (can be large — do only if not already done)
+    # Decompress the disk image
     if [ ! -s "${img}" ]; then
-        echo "[setup] decompressing piCore64 disk image …"
+        echo "[setup] decompressing piCore64 disk image ..."
         zcat "${img_gz}" > "${img}"
     fi
 
-    # Attach the image as a loop device with partition scanning
+    # Attach the image as a loop device with partition scanning.
+    # Partition layout:  p1 = FAT32 (boot files + rootfs cpio)
+    #                    p2 = ext4  (persistent TCE storage, not the OS rootfs)
     local loop
     loop=$(sudo losetup -Pf --show "${img}")
     echo "[setup] loop device: ${loop}"
 
-    # Partition 2 is the ext4 rootfs
-    local rootfs_part="${loop}p2"
-    local mnt="/tmp/pi-rootfs-mnt"
-    sudo mkdir -p "${mnt}"
-    sudo mount -o ro "${rootfs_part}" "${mnt}"
+    # Mount the FAT boot partition and extract the cpio rootfs from it.
+    # The rootfs cpio is named rootfs-piCore64-16.0.gz on partition 1.
+    local fat_mnt="/tmp/pi-fat-mnt"
+    sudo mkdir -p "${fat_mnt}"
+    sudo mount -o ro "${loop}p1" "${fat_mnt}"
 
-    echo "[setup] copying Pi rootfs into chroot …"
-    sudo cp -a "${mnt}/." "${CHROOT_DIR}/"
+    echo "[setup] extracting cpio rootfs from Pi FAT partition ..."
+    local rootfs_cpio
+    rootfs_cpio=$(find "${fat_mnt}" -maxdepth 1 -name "rootfs*.gz" | head -1)
+    echo "[setup] rootfs cpio: ${rootfs_cpio}"
 
-    sudo umount "${mnt}"
+    cd "${CHROOT_DIR}"
+    zcat "${rootfs_cpio}" | sudo cpio -idm 2>/dev/null || true
+    cd -
+
+    sudo umount "${fat_mnt}"
     sudo losetup -d "${loop}"
-    echo "[setup] Pi rootfs extracted"
+    echo "[setup] aarch64 rootfs extracted"
 }
 
 # ---------------------------------------------------------------------------
