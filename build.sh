@@ -1,6 +1,9 @@
 #!/bin/sh
 # Build Gershwin in a Tiny Core Linux 16.x chroot using the existing clang.tcz
 # from the official TCE repository.  No Docker required; pure chroot.
+#
+# For aarch64: TCE only ships a Pi disk image, not a cpio initramfs, so we
+# build natively on the Ubuntu ARM runner instead (BUILD_NATIVE=1).
 
 set -e
 
@@ -8,10 +11,14 @@ set -e
 # Configuration
 # ---------------------------------------------------------------------------
 TCE_VERSION="16.x"
-TCE_ARCH="x86_64"
+TCE_ARCH="${TCE_ARCH:-x86_64}"
 TCE_BASE_URL="http://www.tinycorelinux.net/${TCE_VERSION}/${TCE_ARCH}"
 TCE_TCZ_URL="${TCE_BASE_URL}/tcz"
 TCE_CORE_URL="${TCE_BASE_URL}/release/distribution_files/corepure64.gz"
+
+# Set BUILD_NATIVE=1 to skip the TCE chroot and build directly on the host
+# (needed for aarch64 where no cpio initramfs is available).
+BUILD_NATIVE="${BUILD_NATIVE:-0}"
 
 CHROOT_DIR="${CHROOT_DIR:-/tmp/tce-chroot}"
 CACHE_DIR="${CACHE_DIR:-/tmp/tce-cache}"
@@ -25,6 +32,25 @@ install_host_deps() {
     sudo apt-get update -qq
     sudo apt-get install -y -qq \
         cpio squashfs-tools wget xz-utils git
+}
+
+# Host prerequisites for native (no-chroot) build
+install_host_deps_native() {
+    echo "[host] installing native build prerequisites"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq \
+        build-essential clang cmake ninja-build git \
+        autoconf automake libtool pkg-config \
+        libgnutls28-dev libicu-dev libxml2-dev libxslt1-dev \
+        libffi-dev libssl-dev libcurl4-openssl-dev libunistring-dev \
+        libavahi-client-dev \
+        libx11-dev libxft-dev libxt-dev \
+        libcairo2-dev libjpeg-dev libpng-dev libtiff-dev \
+        squashfs-tools
+    # Ensure gmake is available
+    if ! command -v gmake > /dev/null 2>&1; then
+        sudo ln -sf "$(command -v make)" /usr/local/bin/gmake
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -245,6 +271,46 @@ INNER
 }
 
 # ---------------------------------------------------------------------------
+# Build Gershwin natively on the host (no chroot — used for aarch64)
+# ---------------------------------------------------------------------------
+build_gershwin_native() {
+    echo "[build] building Gershwin natively on host (no chroot)"
+
+    # /System must NOT exist before we start
+    if [ -d /System ]; then
+        echo "ERROR: /System already exists — removing and rebuilding"
+        sudo rm -rf /System
+    fi
+
+    export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+    export CC=clang
+    export CXX=clang++
+
+    echo "--- clang version ---"
+    clang --version
+
+    echo "--- gmake version ---"
+    gmake --version | head -1
+
+    # Clone Gershwin system repository
+    local work="/tmp/gershwin-system-native"
+    sudo rm -rf "${work}"
+    git clone --recurse-submodules \
+        https://github.com/gershwin-desktop-legacy/system.git \
+        "${work}"
+    cd "${work}"
+
+    sudo make install
+
+    echo "--- /System contents after build ---"
+    find /System -maxdepth 3 | head -40
+    echo "--- /System disk usage ---"
+    du -sh /System
+
+    echo "[build] Gershwin native build complete"
+}
+
+# ---------------------------------------------------------------------------
 # Package /System from the chroot as a TCZ
 # ---------------------------------------------------------------------------
 package_output() {
@@ -254,8 +320,14 @@ package_output() {
     sudo rm -rf "${staging}"
     sudo mkdir -p "${staging}"
 
-    # Copy /System from the chroot into a clean staging directory
-    sudo cp -a "${CHROOT_DIR}/System" "${staging}/"
+    # Copy /System into a clean staging directory.
+    # For native builds /System lives directly on the host; for chroot builds
+    # it lives inside the chroot directory.
+    if [ "${BUILD_NATIVE}" = "1" ]; then
+        sudo cp -a /System "${staging}/"
+    else
+        sudo cp -a "${CHROOT_DIR}/System" "${staging}/"
+    fi
 
     # Also bundle non-glibc shared libraries that Gershwin's ELFs need
     # (so the TCZ is self-contained — avoids requiring a matching host)
