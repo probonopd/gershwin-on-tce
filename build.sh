@@ -218,10 +218,10 @@ package_output() {
     # (so the TCZ is self-contained — avoids requiring a matching host)
     echo "[package] bundling runtime shared libraries"
     sudo mkdir -p "${staging}/System/Library/Libraries"
-    find "${staging}/System" -type f -executable | while read elf; do
+    find "${staging}/System" -type f -executable | while IFS= read -r elf; do
         # Check if it is actually an ELF binary / shared library
         file "${elf}" 2>/dev/null | grep -qE "ELF|shared object" || continue
-        ldd "${elf}" 2>/dev/null | awk '/=>/{print $3}' | while read lib; do
+        ldd "${elf}" 2>/dev/null | awk '/=>/{print $3}' | while IFS= read -r lib; do
             [ -f "${lib}" ] || continue
             libname=$(basename "${lib}")
             # Skip standard glibc/kernel-provided libs
@@ -235,9 +235,10 @@ package_output() {
         done
     done
 
-    # Create the TCZ (SquashFS xz-compressed)
+    # Create the TCZ (SquashFS xz-compressed); show tail of output on failure
     mksquashfs "${staging}" "${BUILD_DIR}/gershwin-system.tcz" \
-        -comp xz -b 1M -noappend -no-progress
+        -comp xz -b 1M -noappend -no-progress 2>&1 | tail -5
+    [ -s "${BUILD_DIR}/gershwin-system.tcz" ] || { echo "ERROR: mksquashfs produced empty file"; exit 1; }
 
     # Metadata
     md5sum "${BUILD_DIR}/gershwin-system.tcz" \
@@ -258,7 +259,7 @@ Copying-policy: GPLv3 / LGPLv2+ (see component licenses)
 Size:           $(du -sh "${BUILD_DIR}/gershwin-system.tcz" | cut -f1)
 Extension_by:   gershwin-on-tce
 Tags:           gnustep objc gershwin desktop
-Comments:       GNUstep-based Gershwin desktop built with clang $(clang --version 2>/dev/null | head -1) on TCE ${TCE_VERSION}
+Comments:       GNUstep-based Gershwin desktop built with clang $(sudo chroot "${CHROOT_DIR}" clang --version 2>/dev/null | head -1) on TCE ${TCE_VERSION}
 Change-log:     $(date +%Y/%m/%d) initial build
 Current:        $(date +%Y/%m/%d) $(date +%Y%m%d)
 EOF
