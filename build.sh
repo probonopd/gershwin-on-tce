@@ -177,9 +177,13 @@ setup_chroot_common() {
     sudo cp /etc/resolv.conf "${CHROOT_DIR}/etc/resolv.conf"
 
     # CA certificates — TCE git/curl look for certs at /usr/local/etc/ssl/certs/
+    # (x86_64) or /usr/local/etc/pki/certs/ (aarch64 piCore build).
     sudo mkdir -p "${CHROOT_DIR}/usr/local/etc/ssl/certs"
     sudo cp /etc/ssl/certs/ca-certificates.crt \
         "${CHROOT_DIR}/usr/local/etc/ssl/certs/ca-certificates.crt"
+    sudo mkdir -p "${CHROOT_DIR}/usr/local/etc/pki/certs"
+    sudo cp /etc/ssl/certs/ca-certificates.crt \
+        "${CHROOT_DIR}/usr/local/etc/pki/certs/ca-bundle.crt"
     sudo mkdir -p "${CHROOT_DIR}/etc/ssl/certs"
     sudo cp /etc/ssl/certs/ca-certificates.crt \
         "${CHROOT_DIR}/etc/ssl/certs/ca-certificates.crt"
