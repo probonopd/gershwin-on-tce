@@ -103,6 +103,7 @@ setup_chroot() {
     sudo cp /etc/resolv.conf "${CHROOT_DIR}/etc/resolv.conf"
 
     # Make /usr/local/lib visible to the dynamic linker inside chroot
+    sudo mkdir -p "${CHROOT_DIR}/etc/ld.so.conf.d"
     echo "/usr/local/lib" | sudo tee "${CHROOT_DIR}/etc/ld.so.conf.d/usr-local.conf" > /dev/null
 
     # Bind-mount pseudo-filesystems
