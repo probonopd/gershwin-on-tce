@@ -13,7 +13,22 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+            tce_arch: x86_64
+            rootfs_cache_path: /tmp/corepure64.gz
+            rootfs_cache_key: tce-16.x-corepure64
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+            tce_arch: aarch64
+            rootfs_cache_path: /tmp/picore64.img.gz
+            rootfs_cache_key: tce-16.x-picore64-img
+
+    runs-on: ${{ matrix.runs-on }}
 
     steps:
       - name: Check out repository
@@ -23,20 +38,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/tce-cache
-          key: tce-16.x-pkgs-${{ hashFiles('build.sh') }}
+          key: tce-16.x-pkgs-${{ matrix.tce_arch }}-${{ hashFiles('build.sh') }}
           restore-keys: |
-            tce-16.x-pkgs-
+            tce-16.x-pkgs-${{ matrix.tce_arch }}-
 
       - name: Cache TCE root filesystem
         uses: actions/cache@v4
         with:
-          path: /tmp/corepure64.gz
-          key: tce-16.x-corepure64
+          path: ${{ matrix.rootfs_cache_path }}
+          key: ${{ matrix.rootfs_cache_key }}
 
       - name: Build Gershwin in TCE 16.x chroot
         run: |
           chmod +x build.sh
-          sudo BUILD_DIR="$GITHUB_WORKSPACE" \
+          sudo TCE_ARCH="${{ matrix.tce_arch }}" \
+               BUILD_DIR="$GITHUB_WORKSPACE" \
                CACHE_DIR=/tmp/tce-cache \
                CHROOT_DIR=/tmp/tce-chroot \
                ./build.sh
@@ -44,7 +60,7 @@ jobs:
       - name: Upload gershwin-system.tcz
         uses: actions/upload-artifact@v4
         with:
-          name: gershwin-system-tce
+          name: gershwin-system-tce-${{ matrix.arch }}
           path: |
             gershwin-system.tcz
             gershwin-system.tcz.md5.txt

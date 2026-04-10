@@ -1,9 +1,14 @@
 #!/bin/sh
-# Build Gershwin in a Tiny Core Linux 16.x chroot using the existing clang.tcz
-# from the official TCE repository.  No Docker required; pure chroot.
+# Build Gershwin in a Tiny Core Linux 16.x chroot.
 #
-# For aarch64: TCE only ships a Pi disk image, not a cpio initramfs, so we
-# build natively on the Ubuntu ARM runner instead (BUILD_NATIVE=1).
+# x86_64 : uses corepure64.gz (cpio initramfs) as the chroot base.
+# aarch64 : uses piCore64-16.0.0.img.gz — the rootfs lives on partition 2
+#            (ext4) of the Pi disk image; we mount it via loopback and copy
+#            it into the chroot directory.
+#
+# Both architectures then install TCZ packages and run the Gershwin Makefile
+# inside the chroot.  Run the aarch64 variant on an ubuntu-24.04-arm runner
+# so the chroot can be entered without QEMU.
 
 set -e
 
@@ -14,11 +19,12 @@ TCE_VERSION="16.x"
 TCE_ARCH="${TCE_ARCH:-x86_64}"
 TCE_BASE_URL="http://www.tinycorelinux.net/${TCE_VERSION}/${TCE_ARCH}"
 TCE_TCZ_URL="${TCE_BASE_URL}/tcz"
+
+# x86_64 base rootfs (cpio initramfs)
 TCE_CORE_URL="${TCE_BASE_URL}/release/distribution_files/corepure64.gz"
 
-# Set BUILD_NATIVE=1 to skip the TCE chroot and build directly on the host
-# (needed for aarch64 where no cpio initramfs is available).
-BUILD_NATIVE="${BUILD_NATIVE:-0}"
+# aarch64 base rootfs (Pi disk image — partition 2 is the ext4 rootfs)
+PI_IMG_URL="http://www.tinycorelinux.net/${TCE_VERSION}/aarch64/release/RPi/piCore64-16.0.0.img.gz"
 
 CHROOT_DIR="${CHROOT_DIR:-/tmp/tce-chroot}"
 CACHE_DIR="${CACHE_DIR:-/tmp/tce-cache}"
@@ -31,26 +37,7 @@ install_host_deps() {
     echo "[host] installing host prerequisites"
     sudo apt-get update -qq
     sudo apt-get install -y -qq \
-        cpio squashfs-tools wget xz-utils git
-}
-
-# Host prerequisites for native (no-chroot) build
-install_host_deps_native() {
-    echo "[host] installing native build prerequisites"
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq \
-        build-essential clang cmake ninja-build git \
-        autoconf automake libtool pkg-config \
-        libgnutls28-dev libicu-dev libxml2-dev libxslt1-dev \
-        libffi-dev libssl-dev libcurl4-openssl-dev libunistring-dev \
-        libavahi-client-dev \
-        libx11-dev libxft-dev libxt-dev \
-        libcairo2-dev libjpeg-dev libpng-dev libtiff-dev \
-        squashfs-tools
-    # Ensure gmake is available
-    if ! command -v gmake > /dev/null 2>&1; then
-        sudo ln -sf "$(command -v make)" /usr/local/bin/gmake
-    fi
+        cpio squashfs-tools wget xz-utils git util-linux e2fsprogs
 }
 
 # ---------------------------------------------------------------------------
@@ -98,10 +85,10 @@ install_tcz() {
 }
 
 # ---------------------------------------------------------------------------
-# Set up the TCE 16.x chroot
+# Set up the TCE 16.x chroot  (x86_64 path)
 # ---------------------------------------------------------------------------
-setup_chroot() {
-    echo "[setup] creating TCE ${TCE_VERSION} chroot at ${CHROOT_DIR}"
+setup_chroot_x86_64() {
+    echo "[setup] creating TCE ${TCE_VERSION} x86_64 chroot at ${CHROOT_DIR}"
     mkdir -p "${CHROOT_DIR}"
 
     # Download base root filesystem
@@ -110,11 +97,63 @@ setup_chroot() {
         wget -q "${TCE_CORE_URL}" -O "${gz}"
     fi
 
-    # Extract initramfs
+    # Extract cpio initramfs
     cd "${CHROOT_DIR}"
     zcat "${gz}" | sudo cpio -idm 2>/dev/null || true
     cd -
 
+    # Create /lib64 -> /lib symlink.
+    # clang on x86_64 embeds interpreter /lib64/ld-linux-x86-64.so.2, but
+    # TCE's initramfs only has /lib/ld-linux-x86-64.so.2 (no /lib64 dir).
+    # Without this the kernel cannot exec any compiled binary.
+    sudo ln -sfn lib "${CHROOT_DIR}/lib64"
+}
+
+# ---------------------------------------------------------------------------
+# Set up the TCE 16.x chroot  (aarch64 path — Pi disk image)
+# ---------------------------------------------------------------------------
+setup_chroot_aarch64() {
+    echo "[setup] creating TCE ${TCE_VERSION} aarch64 chroot at ${CHROOT_DIR}"
+    mkdir -p "${CHROOT_DIR}"
+
+    # Download the Pi disk image (cached as picore64.img.gz)
+    local img_gz="/tmp/picore64.img.gz"
+    local img="/tmp/picore64.img"
+
+    if [ ! -s "${img_gz}" ]; then
+        echo "[setup] downloading piCore64 disk image …"
+        wget -q "${PI_IMG_URL}" -O "${img_gz}"
+    fi
+
+    # Decompress (can be large — do only if not already done)
+    if [ ! -s "${img}" ]; then
+        echo "[setup] decompressing piCore64 disk image …"
+        zcat "${img_gz}" > "${img}"
+    fi
+
+    # Attach the image as a loop device with partition scanning
+    local loop
+    loop=$(sudo losetup -Pf --show "${img}")
+    echo "[setup] loop device: ${loop}"
+
+    # Partition 2 is the ext4 rootfs
+    local rootfs_part="${loop}p2"
+    local mnt="/tmp/pi-rootfs-mnt"
+    sudo mkdir -p "${mnt}"
+    sudo mount -o ro "${rootfs_part}" "${mnt}"
+
+    echo "[setup] copying Pi rootfs into chroot …"
+    sudo cp -a "${mnt}/." "${CHROOT_DIR}/"
+
+    sudo umount "${mnt}"
+    sudo losetup -d "${loop}"
+    echo "[setup] Pi rootfs extracted"
+}
+
+# ---------------------------------------------------------------------------
+# Common chroot post-setup (both architectures)
+# ---------------------------------------------------------------------------
+setup_chroot_common() {
     # Make /usr/local tree available inside the chroot
     sudo mkdir -p \
         "${CHROOT_DIR}/usr/local/bin" \
@@ -126,27 +165,19 @@ setup_chroot() {
     # checks for /System and skips the entire build if it already exists)
     sudo mkdir -p "${CHROOT_DIR}/tmp"
 
-    # Create /lib64 -> /lib symlink.
-    # clang from TCE compiles binaries with interpreter /lib64/ld-linux-x86-64.so.2,
-    # but TCE's initramfs only has /lib/ld-linux-x86-64.so.2 (no /lib64 directory).
-    # Without this symlink the kernel cannot exec any compiled binary.
-    sudo ln -sfn lib "${CHROOT_DIR}/lib64"
-
     # DNS resolution
     sudo cp /etc/resolv.conf "${CHROOT_DIR}/etc/resolv.conf"
 
-    # CA certificates — TCE git/curl are compiled with /usr/local prefix and
-    # look for certs at /usr/local/etc/ssl/certs/ca-certificates.crt
+    # CA certificates — TCE git/curl look for certs at /usr/local/etc/ssl/certs/
     sudo mkdir -p "${CHROOT_DIR}/usr/local/etc/ssl/certs"
     sudo cp /etc/ssl/certs/ca-certificates.crt \
         "${CHROOT_DIR}/usr/local/etc/ssl/certs/ca-certificates.crt"
-    # Also place them where standard tools expect them
     sudo mkdir -p "${CHROOT_DIR}/etc/ssl/certs"
     sudo cp /etc/ssl/certs/ca-certificates.crt \
         "${CHROOT_DIR}/etc/ssl/certs/ca-certificates.crt"
 
-    # Make /usr/local/lib and /usr/lib visible to the dynamic linker inside chroot.
-    # /usr/lib is where corepure64.gz installs libgcc_s.so.1 and libstdc++.so.6.
+    # Make /usr/local/lib and /usr/lib visible to the dynamic linker.
+    # /usr/lib is where the TCE rootfs installs libgcc_s.so.1 and libstdc++.so.6.
     sudo mkdir -p "${CHROOT_DIR}/etc/ld.so.conf.d"
     echo "/usr/local/lib" | sudo tee "${CHROOT_DIR}/etc/ld.so.conf.d/usr-local.conf" > /dev/null
     echo "/usr/lib"       | sudo tee "${CHROOT_DIR}/etc/ld.so.conf.d/usr-lib.conf"   > /dev/null
@@ -158,11 +189,19 @@ setup_chroot() {
     sudo mount -o bind   /dev/pts "${CHROOT_DIR}/dev/pts" 2>/dev/null || true
 }
 
+setup_chroot() {
+    case "${TCE_ARCH}" in
+        aarch64) setup_chroot_aarch64 ;;
+        *)       setup_chroot_x86_64  ;;
+    esac
+    setup_chroot_common
+}
+
 # ---------------------------------------------------------------------------
-# Install all build + runtime dependencies from the TCE 16.x repository
+# Install all build + runtime dependencies from the TCE repository
 # ---------------------------------------------------------------------------
 install_build_deps() {
-    echo "[deps] installing build dependencies from TCE ${TCE_VERSION}"
+    echo "[deps] installing build dependencies from TCE ${TCE_VERSION}/${TCE_ARCH}"
 
     # GNU tar and full xz — BusyBox tar/xz lack flags needed by gnustep-make install rules
     install_tcz tar
@@ -271,46 +310,6 @@ INNER
 }
 
 # ---------------------------------------------------------------------------
-# Build Gershwin natively on the host (no chroot — used for aarch64)
-# ---------------------------------------------------------------------------
-build_gershwin_native() {
-    echo "[build] building Gershwin natively on host (no chroot)"
-
-    # /System must NOT exist before we start
-    if [ -d /System ]; then
-        echo "ERROR: /System already exists — removing and rebuilding"
-        sudo rm -rf /System
-    fi
-
-    export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-    export CC=clang
-    export CXX=clang++
-
-    echo "--- clang version ---"
-    clang --version
-
-    echo "--- gmake version ---"
-    gmake --version | head -1
-
-    # Clone Gershwin system repository
-    local work="/tmp/gershwin-system-native"
-    sudo rm -rf "${work}"
-    git clone --recurse-submodules \
-        https://github.com/gershwin-desktop-legacy/system.git \
-        "${work}"
-    cd "${work}"
-
-    sudo make install
-
-    echo "--- /System contents after build ---"
-    find /System -maxdepth 3 | head -40
-    echo "--- /System disk usage ---"
-    du -sh /System
-
-    echo "[build] Gershwin native build complete"
-}
-
-# ---------------------------------------------------------------------------
 # Package /System from the chroot as a TCZ
 # ---------------------------------------------------------------------------
 package_output() {
@@ -320,14 +319,8 @@ package_output() {
     sudo rm -rf "${staging}"
     sudo mkdir -p "${staging}"
 
-    # Copy /System into a clean staging directory.
-    # For native builds /System lives directly on the host; for chroot builds
-    # it lives inside the chroot directory.
-    if [ "${BUILD_NATIVE}" = "1" ]; then
-        sudo cp -a /System "${staging}/"
-    else
-        sudo cp -a "${CHROOT_DIR}/System" "${staging}/"
-    fi
+    # Copy /System from the chroot into a clean staging directory
+    sudo cp -a "${CHROOT_DIR}/System" "${staging}/"
 
     # Also bundle non-glibc shared libraries that Gershwin's ELFs need
     # (so the TCZ is self-contained — avoids requiring a matching host)
@@ -374,15 +367,15 @@ package_output() {
 
     cat > "${BUILD_DIR}/gershwin-system.tcz.info" << EOF
 Title:          gershwin-system.tcz
-Description:    Gershwin desktop system (GNUstep + workspace)
+Description:    Gershwin desktop system (GNUstep + workspace) for ${TCE_ARCH}
 Version:        $(date +%Y%m%d)
 Author:         Gershwin OS contributors
 Original-site:  https://github.com/gershwin-desktop-legacy/system
 Copying-policy: GPLv3 / LGPLv2+ (see component licenses)
 Size:           $(du -sh "${BUILD_DIR}/gershwin-system.tcz" | cut -f1)
 Extension_by:   gershwin-on-tce
-Tags:           gnustep objc gershwin desktop
-Comments:       GNUstep-based Gershwin desktop built with clang $(sudo chroot "${CHROOT_DIR}" clang --version 2>/dev/null | head -1) on TCE ${TCE_VERSION}
+Tags:           gnustep objc gershwin desktop ${TCE_ARCH}
+Comments:       GNUstep-based Gershwin desktop built with clang $(sudo chroot "${CHROOT_DIR}" clang --version 2>/dev/null | head -1) on TCE ${TCE_VERSION}/${TCE_ARCH}
 Change-log:     $(date +%Y/%m/%d) initial build
 Current:        $(date +%Y/%m/%d) $(date +%Y%m%d)
 EOF
