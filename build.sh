@@ -100,6 +100,12 @@ setup_chroot() {
     # checks for /System and skips the entire build if it already exists)
     sudo mkdir -p "${CHROOT_DIR}/tmp"
 
+    # Create /lib64 -> /lib symlink.
+    # clang from TCE compiles binaries with interpreter /lib64/ld-linux-x86-64.so.2,
+    # but TCE's initramfs only has /lib/ld-linux-x86-64.so.2 (no /lib64 directory).
+    # Without this symlink the kernel cannot exec any compiled binary.
+    sudo ln -sfn lib "${CHROOT_DIR}/lib64"
+
     # DNS resolution
     sudo cp /etc/resolv.conf "${CHROOT_DIR}/etc/resolv.conf"
 
@@ -113,9 +119,11 @@ setup_chroot() {
     sudo cp /etc/ssl/certs/ca-certificates.crt \
         "${CHROOT_DIR}/etc/ssl/certs/ca-certificates.crt"
 
-    # Make /usr/local/lib visible to the dynamic linker inside chroot
+    # Make /usr/local/lib and /usr/lib visible to the dynamic linker inside chroot.
+    # /usr/lib is where corepure64.gz installs libgcc_s.so.1 and libstdc++.so.6.
     sudo mkdir -p "${CHROOT_DIR}/etc/ld.so.conf.d"
     echo "/usr/local/lib" | sudo tee "${CHROOT_DIR}/etc/ld.so.conf.d/usr-local.conf" > /dev/null
+    echo "/usr/lib"       | sudo tee "${CHROOT_DIR}/etc/ld.so.conf.d/usr-lib.conf"   > /dev/null
 
     # Bind-mount pseudo-filesystems
     sudo mount -t proc   none "${CHROOT_DIR}/proc"    2>/dev/null || true
