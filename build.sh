@@ -96,8 +96,9 @@ setup_chroot() {
         "${CHROOT_DIR}/usr/local/include" \
         "${CHROOT_DIR}/usr/local/lib/pkgconfig"
 
-    # Ensure /tmp and /System exist
-    sudo mkdir -p "${CHROOT_DIR}/tmp" "${CHROOT_DIR}/System"
+    # Ensure /tmp exists (do NOT pre-create /System — the Gershwin Makefile
+    # checks for /System and skips the entire build if it already exists)
+    sudo mkdir -p "${CHROOT_DIR}/tmp"
 
     # DNS resolution
     sudo cp /etc/resolv.conf "${CHROOT_DIR}/etc/resolv.conf"
@@ -170,6 +171,10 @@ install_build_deps() {
     # Refresh the shared-library cache inside the chroot
     sudo chroot "${CHROOT_DIR}" /sbin/ldconfig 2>/dev/null || true
 
+    # Ensure gmake is available (make.tcz ships 'make', not 'gmake')
+    sudo chroot "${CHROOT_DIR}" sh -c \
+        '[ -f /usr/local/bin/gmake ] || ln -sf /usr/local/bin/make /usr/local/bin/gmake'
+
     echo "[deps] all dependencies installed"
 }
 
@@ -192,6 +197,16 @@ export LD_LIBRARY_PATH=/usr/local/lib
 echo "--- clang version ---"
 clang --version
 
+# Verify gmake is available
+echo "--- gmake version ---"
+gmake --version | head -1
+
+# /System must NOT exist before we start (Makefile skips build if it does)
+if [ -d /System ]; then
+    echo "ERROR: /System already exists — Makefile would skip the build!"
+    exit 1
+fi
+
 # Clone Gershwin system repository (includes all GNUstep submodules)
 cd /tmp
 git clone --recurse-submodules \
@@ -204,6 +219,11 @@ cd gershwin-system
 #            libs-gui → libs-back → workspace → apps-systempreferences →
 #            dubstep-dark-theme
 make install
+
+echo "--- /System contents after build ---"
+find /System -maxdepth 3 | head -40
+echo "--- /System disk usage ---"
+du -sh /System
 
 echo "[build] Gershwin build complete"
 INNER
@@ -250,6 +270,14 @@ package_output() {
     mksquashfs "${staging}" "${BUILD_DIR}/gershwin-system.tcz" \
         -comp xz -b 1M -noappend -no-progress 2>&1 | tail -5
     [ -s "${BUILD_DIR}/gershwin-system.tcz" ] || { echo "ERROR: mksquashfs produced empty file"; exit 1; }
+
+    # Sanity-check: the real Gershwin build should produce at least 10 MB
+    tcz_size=$(stat -c%s "${BUILD_DIR}/gershwin-system.tcz" 2>/dev/null || stat -f%z "${BUILD_DIR}/gershwin-system.tcz")
+    if [ "${tcz_size}" -lt 10485760 ]; then
+        echo "ERROR: gershwin-system.tcz is only ${tcz_size} bytes (< 10 MB)."
+        echo "       The Gershwin build likely did not run — check for 'System appears to be already installed'."
+        exit 1
+    fi
 
     # Metadata
     md5sum "${BUILD_DIR}/gershwin-system.tcz" \
