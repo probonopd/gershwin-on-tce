@@ -235,12 +235,18 @@ install_build_deps() {
     install_tcz libtool
     install_tcz pkg-config
 
-    # libs-base deps
-    install_tcz gnutls38-dev      # TLS library
-    install_tcz icu74-dev         # Unicode / ICU
+    # libs-base deps — package names differ between x86_64 and aarch64 TCE repos
+    if [ "${TCE_ARCH}" = "aarch64" ]; then
+        install_tcz gnutls-dev        # TLS library (aarch64 name)
+        install_tcz icu73-dev         # Unicode / ICU (aarch64 has icu73, not icu74)
+        install_tcz libffi_base-dev   # FFI (aarch64 name)
+    else
+        install_tcz gnutls38-dev      # TLS library (x86_64 name)
+        install_tcz icu74-dev         # Unicode / ICU (x86_64 name)
+        install_tcz libffi-dev        # FFI (x86_64 name)
+    fi
     install_tcz libxml2-dev       # XML
     install_tcz libxslt-dev       # XSLT
-    install_tcz libffi-dev        # FFI
     install_tcz openssl-dev       # SSL
     install_tcz curl-dev          # libcurl
     install_tcz libunistring-dev  # Unicode strings
