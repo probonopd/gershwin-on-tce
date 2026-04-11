@@ -268,6 +268,9 @@ install_build_deps() {
     install_tcz libxcb-dev        # XCB (gershwin-windowmanager / XCBKit)
     install_tcz libXrandr-dev     # RandR extension
     install_tcz libXcomposite-dev # Composite extension
+    install_tcz libXfixes-dev     # Xfixes (needed by WindowManager / Xcomposite header chain)
+    install_tcz libXext-dev       # X extensions
+    install_tcz cups-dev          # CUPS (gershwin-components/Printers)
     install_tcz dbus-dev          # D-Bus
     install_tcz linux-pam-dev     # PAM (LoginWindow)
     install_tcz portaudio-dev     # PortAudio (Sound component)
