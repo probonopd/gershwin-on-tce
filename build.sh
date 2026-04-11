@@ -232,6 +232,7 @@ install_build_deps() {
     # Source control / autotools
     install_tcz git
     install_tcz autoconf
+    install_tcz automake
     install_tcz libtool
     install_tcz pkg-config
 
