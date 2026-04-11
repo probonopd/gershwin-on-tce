@@ -854,7 +854,7 @@ tce_bootlocal_add() {
 }
 
 # ---------------------------------------------------------------------------
-# TCE X session — write ~/.xsession for each interactive user
+# TCE X session — write ~/.xsession for each interactive user (always overwrite)
 # ---------------------------------------------------------------------------
 configure_tce_xsession() {
     log "Configuring TCE .xsession for Gershwin workspace"
@@ -864,11 +864,8 @@ configure_tce_xsession() {
         [ -d "$homedir" ] || continue
 
         xsession="$homedir/.xsession"
-        if [ -f "$xsession" ]; then
-            log "TCE: $xsession already exists; skipping"
-            continue
-        fi
 
+        # Always write (overwrite) so the correct content is guaranteed each boot
         cat >"$xsession" <<'XSESSION'
 #!/bin/sh
 export PATH=/System/Library/Tools:/usr/local/bin:/usr/bin:/bin
@@ -879,12 +876,68 @@ exec /System/Library/CoreServices/Workspace.app/Workspace
 XSESSION
         chmod +x "$xsession"
         chown "$user" "$xsession" 2>/dev/null || true
-        log "TCE: created $xsession for $user"
+        log "TCE: wrote $xsession for $user"
 
         # Persist the home directory tree (filetool.sh covers home/tc by default,
         # but be explicit so any username works)
         tce_persist_file "$homedir/.xsession"
     done
+}
+
+# ---------------------------------------------------------------------------
+# TCE: configure fontconfig to find Gershwin fonts in /System/Library/Fonts
+# ---------------------------------------------------------------------------
+configure_tce_fonts() {
+    log "Configuring fontconfig for Gershwin fonts"
+
+    # TCE (piCore/corepure64) uses /usr/local/etc/fonts as its fontconfig prefix
+    local fonts_conf_dir="/usr/local/etc/fonts/conf.d"
+    local gershwin_conf="${fonts_conf_dir}/99-gershwin.conf"
+
+    mkdir -p "$fonts_conf_dir"
+
+    if [ -f "$gershwin_conf" ]; then
+        log "TCE: $gershwin_conf already exists; skipping"
+    else
+        cat >"$gershwin_conf" <<'FONTCONF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+    <!-- Gershwin system fonts -->
+    <dir>/System/Library/Fonts</dir>
+</fontconfig>
+FONTCONF
+        log "TCE: created $gershwin_conf"
+        tce_persist_file "$gershwin_conf"
+    fi
+
+    # Rebuild the font cache so applications find fonts immediately
+    if command -v fc-cache >/dev/null 2>&1; then
+        fc-cache -f 2>/dev/null || true
+        log "TCE: font cache rebuilt"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# TCE on Raspberry Pi: disable overscan (black border) in RPi firmware config
+# ---------------------------------------------------------------------------
+tce_disable_rpi_overscan() {
+    # piCore mounts the FAT boot partition (p1) at /mnt/mmcblk0p1
+    local config_txt="/mnt/mmcblk0p1/config.txt"
+    if [ ! -f "$config_txt" ]; then
+        log "TCE: $config_txt not found; skipping overscan configuration"
+        return
+    fi
+
+    if grep -q 'disable_overscan=1' "$config_txt" 2>/dev/null; then
+        log "TCE: overscan already disabled in $config_txt"
+    else
+        # Remove any existing disable_overscan line, then append the correct one
+        sed -i '/^disable_overscan/d' "$config_txt" 2>/dev/null || true
+        printf 'disable_overscan=1\n' >> "$config_txt"
+        log "TCE: added disable_overscan=1 to $config_txt"
+        tce_persist_file "$config_txt"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1039,7 +1092,9 @@ main() {
     if is_tce; then
         # Tiny Core Linux-specific steps
         add_users_to_video_group_tce
+        configure_tce_fonts
         configure_tce_display
+        tce_disable_rpi_overscan
         set_binary_setuid_tce
         install_amlogic_xorg_conf
 
