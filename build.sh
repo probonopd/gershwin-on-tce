@@ -290,6 +290,18 @@ install_build_deps() {
     # (make / nproc) — TCE has neither /etc/apt nor /etc/arch-release.
     sudo mkdir -p "${CHROOT_DIR}/etc/apt"
 
+    # linux-pam-dev installs headers to /usr/local/include/pam_*.h but code
+    # includes <security/pam_appl.h>. Create a security/ directory of symlinks.
+    sudo chroot "${CHROOT_DIR}" sh -c '
+        mkdir -p /usr/local/include/security
+        for hdr in /usr/local/include/pam_*.h /usr/local/include/_pam_*.h; do
+            [ -f "$hdr" ] || continue
+            base=$(basename "$hdr")
+            target="/usr/local/include/security/$base"
+            [ -e "$target" ] || ln -sf "$hdr" "$target"
+        done
+    '
+
     echo "[deps] all dependencies installed"
 }
 
@@ -528,7 +540,7 @@ make_image_x86_64() {
     echo "[image] creating bootable x86_64 disk image"
 
     local img="${BUILD_DIR}/gershwin-x86_64.img"
-    local img_mb=640
+    local img_mb=2048
 
     # Extra host tools
     sudo apt-get install -y -qq syslinux syslinux-utils dosfstools parted
@@ -648,7 +660,7 @@ make_image_aarch64() {
 
     local base_img="/tmp/picore64.img"
     local img="${BUILD_DIR}/gershwin-aarch64.img"
-    local img_mb=640
+    local img_mb=2048
 
     # Extra host tools (parted, e2fsprogs)
     sudo apt-get install -y -qq parted e2fsprogs
