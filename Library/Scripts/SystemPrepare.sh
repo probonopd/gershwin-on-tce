@@ -878,9 +878,9 @@ XSESSION
         chown "$user" "$xsession" 2>/dev/null || true
         log "TCE: wrote $xsession for $user"
 
-        # Persist the home directory tree (filetool.sh covers home/tc by default,
-        # but be explicit so any username works)
-        tce_persist_file "$homedir/.xsession"
+        # Do NOT persist .xsession via filetool: the gershwin-autostart TCZ
+        # provides it on every boot, so a persistent copy would conflict on
+        # reinstall (causing a "mv: overwrite?" prompt).  The TCZ copy wins.
     done
 }
 

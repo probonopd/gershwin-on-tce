@@ -511,9 +511,14 @@ create_autostart_tcz() {
     # bootlocal.sh — TCE runs this at the end of boot sequence
     sudo tee "${staging}/opt/bootlocal.sh" > /dev/null << 'BOOTLOCAL'
 #!/bin/sh
-# Write .xsession every boot (force overwrite so content is always current)
-mkdir -p /home/tc
-cat > /home/tc/.xsession << 'XSESSION'
+# Auto-start Gershwin desktop
+su - tc -c 'DISPLAY=:0 startx' &
+BOOTLOCAL
+    sudo chmod +x "${staging}/opt/bootlocal.sh"
+
+    # .xsession — called by startx to decide what runs in X
+    sudo mkdir -p "${staging}/home/tc"
+    sudo tee "${staging}/home/tc/.xsession" > /dev/null << 'XSESSION'
 #!/bin/sh
 export PATH=/System/Library/Tools:/usr/local/bin:/usr/bin:/bin
 export GNUSTEP_MAKEFILES=/System/Library/Makefiles
@@ -521,11 +526,7 @@ export GNUSTEP_USER_ROOT=/home/tc/GNUstep
 mkdir -p "${GNUSTEP_USER_ROOT}/Library/ApplicationSupport"
 exec /System/Library/CoreServices/Workspace.app/Workspace
 XSESSION
-chmod +x /home/tc/.xsession
-# Auto-start Gershwin desktop
-su - tc -c 'DISPLAY=:0 startx' &
-BOOTLOCAL
-    sudo chmod +x "${staging}/opt/bootlocal.sh"
+    sudo chmod +x "${staging}/home/tc/.xsession"
 
     mksquashfs "${staging}" "${dest_dir}/gershwin-autostart.tcz" \
         -noappend -no-progress > /dev/null 2>&1
