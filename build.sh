@@ -263,6 +263,18 @@ install_build_deps() {
     install_tcz tiff-dev          # TIFF
     install_tcz libtiff            # TIFF runtime
 
+    # gershwin-developer extra build deps
+    install_tcz libxcb-dev        # XCB (gershwin-windowmanager / XCBKit)
+    install_tcz libXrandr-dev     # RandR extension
+    install_tcz libXcomposite-dev # Composite extension
+    install_tcz dbus-dev          # D-Bus
+    install_tcz linux-pam-dev     # PAM (LoginWindow)
+    install_tcz portaudio-dev     # PortAudio (Sound component)
+    install_tcz coreutils         # nproc (needed by Functions.sh NPROC_CMD)
+    if [ "${TCE_ARCH}" != "aarch64" ]; then
+        install_tcz libao-dev     # libao (Sound component, x86_64 only)
+    fi
+
     # Refresh the shared-library cache inside the chroot
     sudo chroot "${CHROOT_DIR}" /sbin/ldconfig 2>/dev/null || true
 
@@ -270,14 +282,18 @@ install_build_deps() {
     sudo chroot "${CHROOT_DIR}" sh -c \
         '[ -f /usr/local/bin/gmake ] || ln -sf /usr/local/bin/make /usr/local/bin/gmake'
 
+    # Create /etc/apt so Functions.sh detect_platform() selects the "debian" path
+    # (make / nproc) — TCE has neither /etc/apt nor /etc/arch-release.
+    sudo mkdir -p "${CHROOT_DIR}/etc/apt"
+
     echo "[deps] all dependencies installed"
 }
 
 # ---------------------------------------------------------------------------
-# Build Gershwin inside the chroot
+# Build Gershwin inside the chroot using gershwin-developer
 # ---------------------------------------------------------------------------
 build_gershwin() {
-    echo "[build] building Gershwin inside TCE chroot"
+    echo "[build] building Gershwin inside TCE chroot (gershwin-developer)"
 
     # Write the inner build script — runs as root inside the chroot
     sudo tee "${CHROOT_DIR}/tmp/build-gershwin.sh" > /dev/null << 'INNER'
@@ -294,7 +310,7 @@ clang --version
 
 # Verify gmake is available
 echo "--- gmake version ---"
-gmake --version | head -1
+make --version | head -1
 
 # /System must NOT exist before we start (Makefile skips build if it does)
 if [ -d /System ]; then
@@ -302,21 +318,22 @@ if [ -d /System ]; then
     exit 1
 fi
 
-# Clone Gershwin system repository (includes all GNUstep submodules)
+# Clone gershwin-developer (the developer environment that builds everything)
 cd /tmp
-git clone --recurse-submodules \
-    https://github.com/gershwin-desktop-legacy/system.git \
-    gershwin-system
-cd gershwin-system
+git clone --depth=1 \
+    https://github.com/gershwin-desktop/gershwin-developer.git \
+    gershwin-developer
+cd gershwin-developer
 
-# The Makefile installs to /System and detects WORKDIR automatically.
-# It builds: tools-make → libobjc2 (cmake/clang) → libs-base →
-#            libs-gui → libs-back → workspace → apps-systempreferences →
-#            dubstep-dark-theme
-make install
+# Fetch all source repos (gershwin-system, tools-make, libobjc2,
+# libs-base, libs-gui, libs-back, libdispatch, workspaces, components…)
+sh ./Library/Scripts/Checkout.sh
+
+# Run the full Gershwin build (Install-System-Domain.sh via Makefile)
+FROM_MAKEFILE=1 make install
 
 echo "--- /System contents after build ---"
-find /System -maxdepth 3 | head -40
+find /System -maxdepth 3 | head -60
 echo "--- /System disk usage ---"
 du -sh /System
 
@@ -388,7 +405,7 @@ Title:          gershwin-system.tcz
 Description:    Gershwin desktop system (GNUstep + workspace) for ${TCE_ARCH}
 Version:        $(date +%Y%m%d)
 Author:         Gershwin OS contributors
-Original-site:  https://github.com/gershwin-desktop-legacy/system
+Original-site:  https://github.com/gershwin-desktop/gershwin-developer
 Copying-policy: GPLv3 / LGPLv2+ (see component licenses)
 Size:           $(du -sh "${BUILD_DIR}/gershwin-system.tcz" | cut -f1)
 Extension_by:   gershwin-on-tce
@@ -572,8 +589,12 @@ SYSCONFIG
     # Copy the Gershwin TCZ (already built)
     sudo cp "${BUILD_DIR}/gershwin-system.tcz" "${store_mnt}/tce/optional/"
 
-    # Download Xorg bundle (Xorg-7.7.tcz pulls xorg-server + vesa + input + fonts)
+    # clang + compiletc (binutils → libbfd) needed at runtime for ObjC JIT / plugins
     _img_pkgs="" ; _img_onboot=""
+    download_tcz_to_dir compiletc          "${store_mnt}/tce/optional"
+    download_tcz_to_dir clang              "${store_mnt}/tce/optional"
+
+    # Download Xorg bundle (Xorg-7.7.tcz pulls xorg-server + vesa + input + fonts)
     download_tcz_to_dir Xorg-7.7           "${store_mnt}/tce/optional"
 
     # Gershwin runtime libraries
@@ -651,8 +672,12 @@ make_image_aarch64() {
     # Copy the Gershwin TCZ (already built)
     sudo cp "${BUILD_DIR}/gershwin-system.tcz" "${store_mnt}/tce/optional/"
 
-    # Download aarch64 Xorg bundle and runtime dependencies
+    # clang + compiletc (binutils → libbfd) needed at runtime for ObjC JIT / plugins
     _img_pkgs="" ; _img_onboot=""
+    download_tcz_to_dir compiletc          "${store_mnt}/tce/optional"
+    download_tcz_to_dir clang              "${store_mnt}/tce/optional"
+
+    # Download aarch64 Xorg bundle and runtime dependencies
     download_tcz_to_dir Xorg                "${store_mnt}/tce/optional"
 
     # Gershwin runtime libraries (aarch64 package names)
